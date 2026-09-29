@@ -1,7 +1,15 @@
 import os
+from typing import AsyncGenerator
 import warnings
+
+from google.adk.agents.base_agent import BaseAgent
+from google.adk.agents.invocation_context import InvocationContext
 from google.adk.agents.llm_agent import Agent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+from google.adk.events.event import Event
+from google.genai import types
+import vertexai
+from vertexai import agent_engines
 
 warnings.filterwarnings("ignore", message=".*EXPERIMENTAL.*")
 
@@ -10,43 +18,126 @@ warnings.filterwarnings("ignore", message=".*EXPERIMENTAL.*")
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 
+
 # ============================================================================
-# IMPORTANT: CONFIGURE YOUR `check-gcp-subnet-ips` A2A AGENT URL HERE
+# CONFIGURATION: CHOOSE HOW `network_agent` CONNECTS TO `check_gcp_subnet_ips`
 # ============================================================================
-# If you delete and recreate the `check-gcp-subnet-ips` Cloud Run service and get
-# a new URL, either:
-#   1. Replace `<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>` below with your
-#      new Cloud Run base URL (e.g. "https://check-gcp-subnet-ips-xxxxx.asia-southeast2.run.app"), OR
-#   2. Pass `--update-env-vars="CHECK_GCP_SUBNET_IPS_BASE_URL=https://..."` on Cloud Run.
-#
-# NOTE: This URL is used by `network_agent` in BOTH Cloud Run AND Agent Platform
-# (Vertex AI Agent Engine) whenever `network_agent` calls `check_gcp_subnet_ips` via A2A!
+# Supported values for `SUBNET_AGENT_TARGET`:
+#   - "auto" (default):
+#       * On Cloud Run -> calls `check-gcp-subnet-ips` on Cloud Run (Mode 1: Native Cloud Run)
+#       * On Agent Platform -> calls `check-gcp-subnet-ips` on Agent Platform (Mode 2: Native Agent Platform)
+#   - "cloud_run":
+#       * Forces `network_agent` to call `check-gcp-subnet-ips` on Cloud Run via A2A URL
+#   - "agent_platform":
+#       * Forces `network_agent` to call `check-gcp-subnet-ips` on Agent Platform via ReasoningEngine ID
+#         (Use this on Cloud Run for Mode 3: Hybrid Cloud Run -> Agent Platform!)
+SUBNET_AGENT_TARGET = os.environ.get("SUBNET_AGENT_TARGET", "auto").lower()
+
+# 1. Target URL for Cloud Run `check-gcp-subnet-ips` (Used in Mode 1: Cloud Run -> Cloud Run)
+#    Current live URL: "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app"
 CHECK_GCP_SUBNET_IPS_BASE_URL = os.environ.get(
     "CHECK_GCP_SUBNET_IPS_BASE_URL",
     "https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>",
 )
-
 CHECK_GCP_SUBNET_IPS_CARD_URL = os.environ.get(
     "CHECK_GCP_SUBNET_IPS_AGENT_CARD_URL",
     f"{CHECK_GCP_SUBNET_IPS_BASE_URL.rstrip('/')}/a2a/check_gcp_subnet_ips/.well-known/agent-card.json",
 )
 
-
-# ============================================================================
-# FORK 1 (SEPARATELY DEPLOYED REMOTE AGENT!): `check_gcp_subnet_ips` via A2A
-# ============================================================================
-# Instead of running inside the same container/process, `check_gcp_subnet_ips`
-# is deployed as its own standalone Agent service in asia-southeast2.
-# `network_agent` calls it over the network using the Agent-to-Agent (A2A) protocol!
-
-check_gcp_subnet_ips = RemoteA2aAgent(
-    name="check_gcp_subnet_ips",
-    description=(
-        "Separately deployed GCP Subnet Calculator Agent that calculates total IPs, "
-        "usable IPs, netmask, and the 4 GCP-reserved IP addresses for any IPv4 CIDR block."
-    ),
-    agent_card=CHECK_GCP_SUBNET_IPS_CARD_URL,
+# 2. Target Resource Name for Agent Platform `check-gcp-subnet-ips` (Used in Mode 2 & Mode 3)
+#    Current live ID: "projects/66063681189/locations/asia-southeast2/reasoningEngines/2395879817389015040"
+CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID = os.environ.get(
+    "CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID",
+    "projects/66063681189/locations/asia-southeast2/reasoningEngines/<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID>",
 )
+
+
+# ============================================================================
+# HELPER CLASS FOR AGENT PLATFORM -> AGENT PLATFORM (OR HYBRID CLOUD RUN -> AGENT PLATFORM)
+# ============================================================================
+
+class RemoteAgentEngineSubAgent(BaseAgent):
+    """Sub-Agent that calls `check-gcp-subnet-ips` deployed on Vertex AI Agent Engine (Agent Platform)
+    with ZERO Cloud Run dependency!"""
+
+    agent_engine_id: str
+    project: str = "gcp-demo-02-307713"
+    location: str = "asia-southeast2"
+
+    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        user_text = ""
+        if ctx.user_content and ctx.user_content.parts:
+            user_text = "\n".join(p.text for p in ctx.user_content.parts if p.text)
+        if not user_text and ctx.session and ctx.session.events:
+            for ev in reversed(ctx.session.events):
+                if ev.author == "user" and ev.content and ev.content.parts:
+                    texts = [p.text for p in ev.content.parts if p.text]
+                    if texts:
+                        user_text = "\n".join(texts)
+                        break
+
+        vertexai.init(project=self.project, location=self.location)
+        remote_app = agent_engines.get(self.agent_engine_id)
+        final_text = ""
+        async for chunk in remote_app.async_stream_query(
+            user_id=ctx.user_id or "default_user",
+            message=user_text or "Calculate subnet IPs",
+        ):
+            if isinstance(chunk, dict):
+                parts = chunk.get("content", {}).get("parts", [])
+                for p in parts:
+                    if "text" in p and p["text"]:
+                        final_text = p["text"]
+
+        if not final_text:
+            final_text = "No response received from remote Agent Engine."
+
+        yield Event(
+            invocation_id=ctx.invocation_id,
+            author=self.name,
+            branch=ctx.branch,
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=final_text)],
+            ),
+        )
+
+
+# ============================================================================
+# FORK 1: BUILD THE REMOTE `check_gcp_subnet_ips` SUB-AGENT (CLOUD RUN OR AGENT PLATFORM)
+# ============================================================================
+
+def _create_subnet_sub_agent() -> BaseAgent:
+    # Determine effective target:
+    # Cloud Run automatically sets the `K_SERVICE` environment variable.
+    if SUBNET_AGENT_TARGET == "auto":
+        effective_target = "cloud_run" if os.environ.get("K_SERVICE") else "agent_platform"
+    else:
+        effective_target = SUBNET_AGENT_TARGET
+
+    if effective_target == "agent_platform":
+        # Mode 2 (Agent Platform -> Agent Platform) OR Mode 3 (Cloud Run -> Agent Platform)
+        return RemoteAgentEngineSubAgent(
+            name="check_gcp_subnet_ips",
+            description=(
+                "Separately deployed GCP Subnet Calculator Agent on Agent Platform (Vertex AI Agent Engine) "
+                "that calculates total IPs, usable IPs, netmask, and the 4 GCP-reserved IP addresses for any IPv4 CIDR block."
+            ),
+            agent_engine_id=CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID,
+        )
+    else:
+        # Mode 1 (Cloud Run -> Cloud Run via A2A protocol)
+        return RemoteA2aAgent(
+            name="check_gcp_subnet_ips",
+            description=(
+                "Separately deployed GCP Subnet Calculator Agent on Cloud Run (A2A) "
+                "that calculates total IPs, usable IPs, netmask, and the 4 GCP-reserved IP addresses for any IPv4 CIDR block."
+            ),
+            agent_card=CHECK_GCP_SUBNET_IPS_CARD_URL,
+        )
+
+
+check_gcp_subnet_ips = _create_subnet_sub_agent()
 
 
 # ============================================================================
@@ -105,6 +196,6 @@ root_agent = Agent(
         "- Whenever the user asks about Agent Gateway architecture, deployment modes, or traffic flows, "
         "call your local function tool `recommend_agent_gateway_mode`."
     ),
-    sub_agents=[check_gcp_subnet_ips],          # <-- Fork 1: Remote Agent over A2A (🤖)
+    sub_agents=[check_gcp_subnet_ips],          # <-- Fork 1: Remote Agent (Cloud Run A2A OR Agent Platform) (🤖)
     tools=[recommend_agent_gateway_mode],       # <-- Fork 2: Local Python Function (🔧)
 )

@@ -1,6 +1,6 @@
-# Simple Agent 02 (`network-agent` + `check-gcp-subnet-ips`) — Distributed Multi-Agent A2A Architecture
+# Simple Agent 02 (`network-agent` + `check-gcp-subnet-ips`) — Distributed Multi-Agent Study Guide
 
-A distributed **two-agent deployment** built with the **Google Agent Development Kit (ADK)** and **Agent-to-Agent (A2A)** protocol, deployed in **`asia-southeast2` (Jakarta)** on both **Cloud Run** and **Vertex AI Agent Engine (Agent Platform)** to study **Agent Gateway** and **Agent Registry**.
+A distributed **two-agent deployment** built with the **Google Agent Development Kit (ADK)**, deployed in **`asia-southeast2` (Jakarta)** to study **Agent Gateway**, **Agent Registry**, and multi-agent connectivity across **Cloud Run** and **Agent Platform (Vertex AI Agent Engine)**.
 
 ---
 
@@ -12,39 +12,50 @@ In **`simple-agent-02`**, we split the deployment into **2 separate, independent
 
 | Component | In `simple-agent-01` | In `simple-agent-02` | How It Is Deployed Now |
 | :--- | :--- | :--- | :--- |
-| **Main Agent** | `network_gateway_assistant` | **`network-agent`** (`network_agent`) | Deployed as its own standalone service on **Cloud Run** and **Agent Platform** |
-| **Fork 1: `check_gcp_subnet_ips`** | 🔧 Plain Python Function | 🤖 **Standalone Remote Agent (`check-gcp-subnet-ips`)** | Deployed as its own separate service on **Cloud Run** and **Agent Platform**. `network-agent` calls it over the network via **A2A (`RemoteA2aAgent`)**! |
+| **Main Agent** | `network_gateway_assistant` | **`network-agent`** (`network_agent`) | Deployed as its own standalone service on **Cloud Run** and/or **Agent Platform** |
+| **Fork 1: `check_gcp_subnet_ips`** | 🔧 Plain Python Function | 🤖 **Standalone Remote Agent (`check-gcp-subnet-ips`)** | Deployed as its own separate service on **Cloud Run** and/or **Agent Platform**. `network-agent` calls it over the network! |
 | **Fork 2: `recommend_agent_gateway_mode`** | 🔧 Plain Python Function | 🔧 **Local Python Function** | Kept inside `network-agent` as a local function tool (`tools=[recommend_agent_gateway_mode]`) |
 
 ---
 
-## 2. Visual Architecture (2 Separate Deployed Agents)
+## 2. Three Supported Multi-Agent Deployment & Connectivity Modes
+
+[`network_agent/agent.py`](./network_agent/agent.py) is built so you can run the two agents in **3 different architectural topologies** controlled by a single variable (`SUBNET_AGENT_TARGET`):
+
+| Mode | Where `network-agent` Runs | Where `check-gcp-subnet-ips` Runs | `SUBNET_AGENT_TARGET` Setting | How `network-agent` Calls `check-gcp-subnet-ips` | Cloud Run Dependency? |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Mode 1: Native Cloud Run Only** | **Cloud Run** | **Cloud Run** | `"cloud_run"` *(or `"auto"` on Cloud Run)* | **A2A Protocol over HTTPS** (`RemoteA2aAgent` $\rightarrow$ `https://check-gcp-subnet-ips-...run.app/a2a/check_gcp_subnet_ips`) | Uses Cloud Run only (Zero Agent Platform needed) |
+| **Mode 2: Native Agent Platform Only** | **Agent Platform** *(Vertex AI Agent Engine)* | **Agent Platform** *(Vertex AI Agent Engine)* | `"agent_platform"` *(or `"auto"` on Agent Platform)* | **Vertex AI Regional API** (`RemoteAgentEngineSubAgent` $\rightarrow$ `reasoningEngines/<ID>:streamQuery` over IAM) | **Zero Cloud Run needed!** |
+| **Mode 3: Hybrid (Cloud Run $\rightarrow$ Agent Platform)** | **Cloud Run** | **Agent Platform** *(Vertex AI Agent Engine)* | `"agent_platform"` *(set on Cloud Run)* | **Vertex AI Regional API** (Cloud Run container calls `reasoningEngines/<ID>:streamQuery` using its GCP Service Account IAM) | Only `network-agent` is on Cloud Run; `check-gcp-subnet-ips` is on Agent Platform only |
+
+---
+
+### Mode 1: Native Cloud Run Only (Cloud Run $\rightarrow$ Cloud Run)
+
+Both agents run as independent **Cloud Run** services in `asia-southeast2`. You do **not** need Agent Platform at all in this mode.
 
 ```text
                         [ User Prompt ]
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  DEPLOYED AGENT 1: `network-agent` (Main Orchestrator Agent)         │
-│  Cloud Run: https://network-agent-66063681189.asia-southeast2.run.app│
-│  Agent Engine ID: 1269979910546391040                                │
+│  CLOUD RUN SERVICE 1: `network-agent`                                │
+│  URL: https://network-agent-66063681189.asia-southeast2.run.app      │
 │                                                                      │
 │                   🤖 network_agent (gemini-2.5-flash)                │
 │                      /                           \                   │
 │       Fork 1: Remote A2A Sub-Agent         Fork 2: Local Function    │
-│       (transfer_to_agent over HTTP)               (in-process)       │
 │                    /                               \                 │
 │                   ▼                                 ▼                │
 │     🌐 RemoteA2aAgent client          🔧 recommend_agent_gateway_mode│
 └───────────────────┼──────────────────────────────────────────────────┘
                     │
                     │  A2A Protocol (JSON-RPC over HTTPS)
-                    │  POST /a2a/check_gcp_subnet_ips
+                    │  POST https://check-gcp-subnet-ips-...run.app/a2a/check_gcp_subnet_ips
                     ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  DEPLOYED AGENT 2: `check-gcp-subnet-ips` (Specialist Agent)         │
-│  Cloud Run: https://check-gcp-subnet-ips-66063681189...run.app       │
-│  Agent Engine ID: 6764371455938396160                                │
+│  CLOUD RUN SERVICE 2: `check-gcp-subnet-ips`                         │
+│  URL: https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app│
 │                                                                      │
 │               🤖 check_gcp_subnet_ips (gemini-2.5-flash)             │
 │                                  │                                   │
@@ -53,107 +64,110 @@ In **`simple-agent-02`**, we split the deployment into **2 separate, independent
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Networking Analogy: Why This Matters for Agent Gateway
-- **Fork 2 (`recommend_agent_gateway_mode`)** is an **internal function call** inside `network-agent`'s own process (like a router checking its local routing table).
-- **Fork 1 (`check-gcp-subnet-ips`)** is a **real network hop between two separately deployed agents** using the **A2A (Agent-to-Agent) protocol** (`/.well-known/agent-card.json` + JSON-RPC over HTTPS). This is the exact east-west **Agent-to-Agent (A2A)** traffic flow that **Agent Gateway** governs and secures!
+---
+
+### Mode 2: Native Agent Platform Only (Agent Platform $\rightarrow$ Agent Platform)
+
+Both agents run inside **Agent Platform (Vertex AI Agent Engine)** in `asia-southeast2`.
+- **Zero Cloud Run dependency:** Even if you delete all Cloud Run services, `network-agent` on Agent Platform calls `check-gcp-subnet-ips` on Agent Platform directly using its **Reasoning Engine Resource ID** (`projects/66063681189/locations/asia-southeast2/reasoningEngines/<ID>`).
+
+```text
+                        [ User / Playground / API ]
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  AGENT ENGINE 1: `network-agent` (Agent Platform)                    │
+│  ID: projects/66063681189/locations/asia-southeast2/                 │
+│      reasoningEngines/5881665928973778944                            │
+│                                                                      │
+│                   🤖 network_agent (gemini-2.5-flash)                │
+│                      /                           \                   │
+│       Fork 1: RemoteAgentEngineSubAgent    Fork 2: Local Function    │
+│                    /                               \                 │
+│                   ▼                                 ▼                │
+│     ☁️ vertexai.agent_engines.get()   🔧 recommend_agent_gateway_mode│
+└───────────────────┼──────────────────────────────────────────────────┘
+                    │
+                    │  Vertex AI Regional API (IAM Authenticated)
+                    │  asia-southeast2-aiplatform.googleapis.com
+                    ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  AGENT ENGINE 2: `check-gcp-subnet-ips` (Agent Platform)             │
+│  ID: projects/66063681189/locations/asia-southeast2/                 │
+│      reasoningEngines/2395879817389015040                            │
+│                                                                      │
+│               🤖 check_gcp_subnet_ips (gemini-2.5-flash)             │
+│                                  │                                   │
+│                                  ▼                                   │
+│                      🔧 calculate_subnet_ips                         │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 3. Live Deployments in `asia-southeast2` (`gcp-demo-02-307713`)
+### Mode 3: Hybrid (`network-agent` on Cloud Run $\rightarrow$ `check-gcp-subnet-ips` on Agent Platform)
 
-### A. Cloud Run Services (`asia-southeast2`)
+**Question:** *If `network-agent` is deployed on Cloud Run and `check-gcp-subnet-ips` is deployed ONLY on Agent Platform, can `network-agent` still access `check-gcp-subnet-ips`?*
+
+**Answer:** **Yes!**
+- Why it works: Your `network-agent` Cloud Run service runs as a Google Cloud Service Account (`66063681189-compute@developer.gserviceaccount.com`) that has IAM permission (`roles/aiplatform.user`) to invoke Vertex AI Agent Engines in your project.
+- How to enable Mode 3 on Cloud Run without re-deploying code:
+  Simply set `SUBNET_AGENT_TARGET=agent_platform` on the `network-agent` Cloud Run service:
+  ```bash
+  gcloud run services update network-agent \
+    --project=gcp-demo-02-307713 \
+    --region=asia-southeast2 \
+    --update-env-vars="SUBNET_AGENT_TARGET=agent_platform,CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID=projects/66063681189/locations/asia-southeast2/reasoningEngines/2395879817389015040"
+  ```
+- To switch `network-agent` on Cloud Run back to **Mode 1 (Cloud Run $\rightarrow$ Cloud Run)**:
+  ```bash
+  gcloud run services update network-agent \
+    --project=gcp-demo-02-307713 \
+    --region=asia-southeast2 \
+    --update-env-vars="SUBNET_AGENT_TARGET=cloud_run"
+  ```
+
+---
+
+## 3. Live Endpoints in `asia-southeast2` (`gcp-demo-02-307713`)
+
+### A. Native Cloud Run Deployments (`asia-southeast2`)
 1. **`network-agent` (Main Agent)**
    - **Web UI / Playground:** `https://network-agent-66063681189.asia-southeast2.run.app`
    - **A2A Agent Card URL:** `https://network-agent-66063681189.asia-southeast2.run.app/a2a/network_agent/.well-known/agent-card.json`
-   - **Agent Registry Service:** `projects/gcp-demo-02-307713/locations/asia-southeast2/services/network-agent-cloudrun`
 2. **`check-gcp-subnet-ips` (Standalone Subnet Calculator Agent)**
    - **Web UI / Playground:** `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app`
    - **A2A Agent Card URL:** `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json`
-   - **A2A JSON-RPC Endpoint:** `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips`
-   - **Agent Registry Service:** `projects/gcp-demo-02-307713/locations/asia-southeast2/services/check-gcp-subnet-ips-cloudrun`
 
-### B. Vertex AI Agent Engine / Agent Platform (`asia-southeast2`)
+### B. Native Agent Platform Deployments (`asia-southeast2`)
 1. **`network-agent` (Main Agent)**
-   - **Resource Name:** `projects/66063681189/locations/asia-southeast2/reasoningEngines/1269979910546391040`
-   - **Console Playground:** [Open `network-agent` in Agent Engine Playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/1269979910546391040/playground?project=66063681189)
+   - **Resource Name:** `projects/66063681189/locations/asia-southeast2/reasoningEngines/5881665928973778944`
+   - **Console Playground:** [Open `network-agent` in Agent Engine Playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/5881665928973778944/playground?project=66063681189)
 2. **`check-gcp-subnet-ips` (Standalone Subnet Calculator Agent)**
-   - **Resource Name:** `projects/66063681189/locations/asia-southeast2/reasoningEngines/6764371455938396160`
-   - **Console Playground:** [Open `check-gcp-subnet-ips` in Agent Engine Playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/6764371455938396160/playground?project=66063681189)
+   - **Resource Name:** `projects/66063681189/locations/asia-southeast2/reasoningEngines/2395879817389015040`
+   - **Console Playground:** [Open `check-gcp-subnet-ips` in Agent Engine Playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/2395879817389015040/playground?project=66063681189)
 
 ---
 
-## 4. Repository Structure
+## 4. Copy-Pasteable Placeholders (If You Delete and Re-Deploy From Scratch)
 
-```text
-simple-agent-02/
-├── README.md
-├── check_gcp_subnet_ips/        # Deployed Agent 1: Standalone Subnet Calculator Agent
-│   ├── __init__.py
-│   ├── agent.py                 # Defines `check_gcp_subnet_ips` Agent + `calculate_subnet_ips` tool
-│   ├── agent.json               # A2A v1 AgentCard exposed at /a2a/check_gcp_subnet_ips/.well-known/agent-card.json
-│   └── requirements.txt
-└── network_agent/               # Deployed Agent 2: Main Orchestrator Agent
-    ├── __init__.py
-    ├── agent.py                 # Defines `network_agent` + RemoteA2aAgent(`check_gcp_subnet_ips`) + `recommend_agent_gateway_mode`
-    ├── agent.json               # A2A v1 AgentCard exposed at /a2a/network_agent/.well-known/agent-card.json
-    └── requirements.txt
-```
+To prevent confusion if you ever delete and re-create the agents and get new URLs or Agent Engine IDs, the files in this repository use explicit `<REPLACE_WITH_...>` placeholders:
+
+| File | Placeholder to Replace | What to Paste | Needed For |
+| :--- | :--- | :--- | :--- |
+| [`check_gcp_subnet_ips/agent.json`](./check_gcp_subnet_ips/agent.json) | `https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>` | Your `check-gcp-subnet-ips` Cloud Run URL (e.g. `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app`) | **Mode 1** (Cloud Run A2A) |
+| [`network_agent/agent.json`](./network_agent/agent.json) | `https://<REPLACE_WITH_NETWORK_AGENT_CLOUD_RUN_URL>` | Your `network-agent` Cloud Run URL (e.g. `https://network-agent-66063681189.asia-southeast2.run.app`) | **Mode 1** (Cloud Run A2A) |
+| [`network_agent/agent.py`](./network_agent/agent.py) | `https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>` | Your `check-gcp-subnet-ips` Cloud Run URL *(or pass via `CHECK_GCP_SUBNET_IPS_BASE_URL` env var)* | **Mode 1** (Cloud Run $\rightarrow$ Cloud Run) |
+| [`network_agent/agent.py`](./network_agent/agent.py) | `<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID>` | Your `check-gcp-subnet-ips` Agent Engine ID (e.g. `2395879817389015040`) | **Mode 2** (Agent Platform $\rightarrow$ Agent Platform) & **Mode 3** (Hybrid) |
 
 ---
 
-## 5. How to Test Both Forks on `network-agent`
+## 5. Step-by-Step Re-Deployment Recipes (`asia-southeast2`)
 
-Open the **`network-agent`** Web UI (`https://network-agent-66063681189.asia-southeast2.run.app`) or the Agent Engine Playground:
-
-### Test Fork 1 — Remote A2A Agent Call (`network-agent` $\rightarrow$ `check-gcp-subnet-ips`)
-Try asking:
-- *"How many usable IPs are in 10.10.0.0/28 in GCP?"*
-- *"Calculate the GCP reserved IPs and usable host count for 192.168.1.0/24."*
-
-**What you will see in the UI:**
-1. `network_agent` calls `transfer_to_agent(agent_name="check_gcp_subnet_ips")`.
-2. Behind the scenes, `RemoteA2aAgent` sends an A2A JSON-RPC request over HTTPS to the separately deployed **`check-gcp-subnet-ips`** service (`https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips`).
-3. The remote `check-gcp-subnet-ips` agent runs `calculate_subnet_ips` and returns the response back to `network_agent`.
-
-### Test Fork 2 — Local Function Call (`recommend_agent_gateway_mode`)
-Try asking:
-- *"Which Agent Gateway deployment mode should I use for agent to MCP tool egress traffic?"*
-- *"Recommend an Agent Gateway mode if I already have an existing ALB or Secure Web Proxy."*
-
-**What you will see in the UI:**
-1. `network_agent` calls its local Python function `recommend_agent_gateway_mode` directly inside its own container.
-
----
-
-## 6. Configuring the Remote Agent URL (If You Recreate `check-gcp-subnet-ips`)
-
-In [`network_agent/agent.py`](./network_agent/agent.py), the URL for `check-gcp-subnet-ips` uses a placeholder by default so you never accidentally point to a stale hardcoded URL:
-
-```python
-CHECK_GCP_SUBNET_IPS_BASE_URL = os.environ.get(
-    "CHECK_GCP_SUBNET_IPS_BASE_URL",
-    "https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>",
-)
-```
-
-If you delete and recreate the `check-gcp-subnet-ips` Cloud Run service and receive a new URL:
-1. **Option A (Without touching code — Cloud Run only):** Update the environment variable on the `network-agent` Cloud Run service:
-   ```bash
-   gcloud run services update network-agent \
-     --project=gcp-demo-02-307713 \
-     --region=asia-southeast2 \
-     --update-env-vars="CHECK_GCP_SUBNET_IPS_BASE_URL=https://<YOUR_NEW_CHECK_GCP_SUBNET_IPS_URL>"
-   ```
-2. **Option B (For both Cloud Run and Agent Platform / Vertex AI Agent Engine):** Replace `https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>` in [`network_agent/agent.py`](./network_agent/agent.py) (and `supported_interfaces[0].url` in [`check_gcp_subnet_ips/agent.json`](./check_gcp_subnet_ips/agent.json) if the URL of `check-gcp-subnet-ips` changed) before deploying.
-   - **Important:** Because both Cloud Run and Agent Platform run [`network_agent/agent.py`](./network_agent/agent.py), `network-agent` on **Agent Platform** also uses this URL to call the remote `check-gcp-subnet-ips` A2A endpoint!
-
----
-
-## 7. Deployment Commands Reference (`asia-southeast2`)
-
-### Deploy Agent 1 (`check-gcp-subnet-ips`)
+### Recipe A: Deploy Native Cloud Run Only (Mode 1: Cloud Run $\rightarrow$ Cloud Run)
 ```bash
-# Deploy to Cloud Run (with A2A + Web UI)
+# 1. Replace <REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL> in check_gcp_subnet_ips/agent.json,
+#    then deploy check-gcp-subnet-ips to Cloud Run:
 adk deploy cloud_run \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
@@ -164,17 +178,12 @@ adk deploy cloud_run \
   ./check_gcp_subnet_ips \
   -- --allow-unauthenticated
 
-# Deploy to Vertex AI Agent Engine
-adk deploy agent_engine \
+gcloud run services update check-gcp-subnet-ips \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
-  --display_name="check-gcp-subnet-ips" \
-  ./check_gcp_subnet_ips
-```
+  --update-env-vars="GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=gcp-demo-02-307713,GOOGLE_CLOUD_LOCATION=global"
 
-### Deploy Agent 2 (`network-agent`)
-```bash
-# Deploy to Cloud Run (with A2A + Web UI)
+# 2. Deploy network-agent to Cloud Run and point it to check-gcp-subnet-ips on Cloud Run:
 adk deploy cloud_run \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
@@ -185,16 +194,35 @@ adk deploy cloud_run \
   ./network_agent \
   -- --allow-unauthenticated
 
-# Configure the remote check-gcp-subnet-ips URL & Vertex AI env vars on Cloud Run
 gcloud run services update network-agent \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
-  --update-env-vars="GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=gcp-demo-02-307713,GOOGLE_CLOUD_LOCATION=global,CHECK_GCP_SUBNET_IPS_BASE_URL=https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app"
+  --update-env-vars="GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=gcp-demo-02-307713,GOOGLE_CLOUD_LOCATION=global,SUBNET_AGENT_TARGET=cloud_run,CHECK_GCP_SUBNET_IPS_BASE_URL=https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app"
+```
 
-# Deploy to Vertex AI Agent Engine (make sure CHECK_GCP_SUBNET_IPS_BASE_URL in network_agent/agent.py is set first!)
+### Recipe B: Deploy Native Agent Platform Only (Mode 2: Agent Platform $\rightarrow$ Agent Platform, Zero Cloud Run)
+```bash
+# 1. Deploy check-gcp-subnet-ips to Agent Platform:
+adk deploy agent_engine \
+  --project=gcp-demo-02-307713 \
+  --region=asia-southeast2 \
+  --display_name="check-gcp-subnet-ips" \
+  ./check_gcp_subnet_ips
+
+# 2. Copy the new reasoningEngines/<ID> printed above and paste it into
+#    CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID in network_agent/agent.py, then deploy network-agent:
 adk deploy agent_engine \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
   --display_name="network-agent" \
   ./network_agent
+```
+
+### Recipe C: Hybrid (`network-agent` on Cloud Run $\rightarrow$ `check-gcp-subnet-ips` on Agent Platform)
+```bash
+# Point the Cloud Run `network-agent` service to the Agent Platform `check-gcp-subnet-ips` ReasoningEngine ID:
+gcloud run services update network-agent \
+  --project=gcp-demo-02-307713 \
+  --region=asia-southeast2 \
+  --update-env-vars="GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=gcp-demo-02-307713,GOOGLE_CLOUD_LOCATION=global,SUBNET_AGENT_TARGET=agent_platform,CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID=projects/66063681189/locations/asia-southeast2/reasoningEngines/2395879817389015040"
 ```
