@@ -266,4 +266,46 @@ Why did `network-agent` on Agent Platform try to use `RemoteA2aAgent` (the Cloud
 3. **IAM Role Required for Agent Engine-to-Agent Engine Calls:**
    On Agent Platform, `network-agent` runs as the **Reasoning Engine Service Agent** (`service-66063681189@gcp-sa-aiplatform-re.iam.gserviceaccount.com`). To allow one Agent Engine to call `:streamQuery` on another Agent Engine, that service account needs **`roles/aiplatform.user`** on the project.
 
+---
+
+### 6.5 Troubleshooting Case Study 3: Adding `network_agent` into Gemini Enterprise Without Agent Gateway
+
+#### The Symptom
+When trying to add `network_agent` (`1765375869557145600`) into **Gemini Enterprise** (`gcp2-ge-demo-01`), typing `1765375869557145600` into the search bar (`"Search by agent name, Agent Registry ID, type, producer, or use case"`) shows:
+- Banner: *"Configure an Agent Gateway to discover and use agents from your project's Agent Gateway registries."*
+- Result: *"No agents found"*
+
+#### Why It Happened
+When you click **+ Add agent** in Gemini Enterprise, the **"Choose an agent type"** screen presents multiple cards:
+1. **Agents from Agent Registry:** Opens the catalog search drawer shown in the screenshot. In the Cloud Console UI code, if the Gemini Enterprise app does not have an **Agent Gateway** configured (`!isAgentGatewayConfigured()`), this drawer immediately returns an empty list (`[]`) because it only queries an **Agent Registry** bound to an **Agent Gateway**! Furthermore, a Vertex AI Reasoning Engine ID (`1765375869557145600`) is an **Agent Runtime** resource, not an Agent Registry ID.
+2. **Custom agent via Agent Runtime:** Connects Gemini Enterprise **directly** to your Vertex AI Agent Engine (`reasoningEngines`) over Google Cloud's internal private networking — **ZERO Agent Gateway or Agent Registry required!**
+3. **Custom agent via A2A:** Connects Gemini Enterprise directly to an A2A Agent Card (such as your Cloud Run agent) — **also without requiring Agent Gateway!**
+
+#### How to Add `network_agent` Without Agent Gateway (UI or `curl`)
+- **Via the Cloud Console UI:**
+  1. Close the search drawer (`X`), click **+ Add agent** again, and on the **"Choose an agent type"** screen, click **Add** on the **"Custom agent via Agent Runtime"** card.
+  2. Click **Next** on the Authorizations step.
+  3. Fill in the **Agent name**, **Description**, and paste the full **Agent Runtime** resource path:
+     `projects/66063681189/locations/asia-southeast2/reasoningEngines/1765375869557145600`
+  4. Click **Create**.
+- **Via REST API (`curl`):**
+  ```bash
+  curl -s -X POST \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    -H "Content-Type: application/json" \
+    -H "X-Goog-User-Project: gcp-demo-02-307713" \
+    "https://global-discoveryengine.googleapis.com/v1alpha/projects/gcp-demo-02-307713/locations/global/collections/default_collection/engines/gcp2-ge-demo-01_1778656046895/assistants/default_assistant/agents" \
+    -d '{
+      "displayName": "Network Agent",
+      "description": "Main Google Cloud Networking & Agent Gateway Assistant. Calculates GCP subnet usable IPs/reserved IPs and recommends Agent Gateway deployment modes.",
+      "adkAgentDefinition": {
+        "provisionedReasoningEngine": {
+          "reasoningEngine": "projects/66063681189/locations/asia-southeast2/reasoningEngines/1765375869557145600"
+        }
+      }
+    }'
+  ```
+  *(Note: Because `gcp2-ge-demo-01` is in the `global` multi-region, it supports connecting to Agent Runtime `reasoningEngines` in any Google Cloud region, including `asia-southeast2`!)*
+
+
 

@@ -280,8 +280,48 @@ for event in remote_network_agent.stream_query(
     print(event)
 ```
 
-### Way 4: Gemini Enterprise (formerly Agentspace) UI *(Production End-User Chat UI)*
-In enterprise production environments where end-users don't have access to the Google Cloud Console, you register the Agent Engine (`projects/66063681189/locations/asia-southeast2/reasoningEngines/5881665928973778944`) into **Gemini Enterprise**, which provides the end-user web chat portal.
+### Way 4: Gemini Enterprise (formerly Agentspace) UI *(Production End-User Chat UI — No Agent Gateway Required!)*
+In enterprise production environments where end-users don't have access to the Google Cloud Console, you can register `network-agent` into **Gemini Enterprise** **without deploying Agent Gateway**:
+
+#### ⚠️ Why "Agents from Agent Registry" Says `"No agents found"`
+When you click **+ Add agent** in Gemini Enterprise (`Apps -> <your-app> -> Agents -> + Add agent`), a **"Choose an agent type"** screen appears with several cards:
+- **Custom agent via Agent Runtime** *(Connects directly to Vertex AI Agent Engine / Reasoning Engine — **NO Agent Gateway required!**)*
+- **Custom agent via A2A** *(Connects directly to an A2A Agent Card / Cloud Run URL — **NO Agent Gateway required!**)*
+- **Agents from Agent Registry** *(Requires an **Agent Gateway** bound to an **Agent Registry**; if no Agent Gateway is configured, searching in this drawer always returns `"No agents found"`!)*
+
+#### Option A: Add via Google Cloud Console UI (No Agent Gateway)
+1. Go to **Gemini Enterprise** $\rightarrow$ **Apps** $\rightarrow$ select your app (e.g., `gcp2-ge-demo-01`) $\rightarrow$ **Agents**.
+2. Click **+ Add agent**.
+3. On the **"Choose an agent type"** screen, click **Add** on the **"Custom agent via Agent Runtime"** card *(do **not** pick "Agents from Agent Registry")*.
+4. On the **Authorizations** step, click **Next** (no OAuth needed).
+5. On the **Configure agent** step, enter:
+   - **Agent name:** `Network Agent`
+   - **Describe your agent:** `Main Google Cloud Networking & Agent Gateway Assistant. Calculates GCP subnet usable IPs/reserved IPs and recommends Agent Gateway deployment modes.`
+   - **Agent Runtime reasoning engine:**
+     ```text
+     projects/66063681189/locations/asia-southeast2/reasoningEngines/1765375869557145600
+     ```
+     *(Replace `1765375869557145600` with your `network-agent` Reasoning Engine ID).*
+6. Click **Create**.
+
+#### Option B: Add via REST API (`curl` in Cloud Shell — No Agent Gateway)
+You can also register `network-agent` directly into your Gemini Enterprise app (`gcp2-ge-demo-01_1778656046895`) with a single `curl` command:
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Content-Type: application/json" \
+  -H "X-Goog-User-Project: gcp-demo-02-307713" \
+  "https://global-discoveryengine.googleapis.com/v1alpha/projects/gcp-demo-02-307713/locations/global/collections/default_collection/engines/gcp2-ge-demo-01_1778656046895/assistants/default_assistant/agents" \
+  -d '{
+    "displayName": "Network Agent",
+    "description": "Main Google Cloud Networking & Agent Gateway Assistant. Calculates GCP subnet usable IPs/reserved IPs and recommends Agent Gateway deployment modes.",
+    "adkAgentDefinition": {
+      "provisionedReasoningEngine": {
+        "reasoningEngine": "projects/66063681189/locations/asia-southeast2/reasoningEngines/1765375869557145600"
+      }
+    }
+  }'
+```
 
 ---
 
