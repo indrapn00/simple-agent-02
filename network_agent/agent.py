@@ -1,44 +1,41 @@
 import os
+import warnings
 from google.adk.agents.llm_agent import Agent
+from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+
+warnings.filterwarnings("ignore", message=".*EXPERIMENTAL.*")
 
 # Ensure Gemini model calls inside Cloud Run or Vertex AI Agent Engine (asia-southeast2)
 # route to Vertex AI's global endpoint in Argolis projects:
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 
-
-# ============================================================================
-# FORK 1 (NOW AN AGENT!): Sub-Agent for GCP Subnet IP Calculation
-# ============================================================================
-# In simple-agent-01, `check_gcp_subnet_ips` was a plain Python function (🔧).
-# In simple-agent-02, `check_gcp_subnet_ips` is promoted to a full AI Sub-Agent (🤖)
-# with its own Gemini model and instructions, delegated to by `network_agent`!
-
-check_gcp_subnet_ips = Agent(
-    model="gemini-2.5-flash",
-    name="check_gcp_subnet_ips",
-    description=(
-        "A dedicated GCP Subnet Calculator Sub-Agent that calculates total IPs, "
-        "usable IPs, netmask, and the 4 GCP-reserved IP addresses for any IPv4 CIDR block."
-    ),
-    instruction=(
-        "You are the `check_gcp_subnet_ips` specialist Sub-Agent. "
-        "Whenever `network_agent` delegates a subnet CIDR question to you (for example, '10.10.0.0/28'):\n"
-        "1. Calculate the total IPv4 addresses in the CIDR block (2^(32 - prefix)).\n"
-        "2. Subtract the 4 IP addresses reserved by Google Cloud VPC in every primary subnet range:\n"
-        "   - Network address (first IP, e.g. .0)\n"
-        "   - Default gateway (second IP, e.g. .1)\n"
-        "   - Second-to-last address (reserved by GCP, e.g. .14 in a /28)\n"
-        "   - Broadcast address (last IP, e.g. .15 in a /28)\n"
-        "3. Present a clear summary showing: CIDR, Netmask, Total Addresses, Usable IPs in GCP VPC, "
-        "and the exact 4 GCP-Reserved IP addresses.\n"
-        "4. If the user later asks about Agent Gateway architecture or traffic modes, transfer control back to `network_agent`."
-    ),
+# URL of the separately deployed `check-gcp-subnet-ips` agent's A2A Agent Card in asia-southeast2:
+CHECK_GCP_SUBNET_IPS_CARD_URL = os.environ.get(
+    "CHECK_GCP_SUBNET_IPS_AGENT_CARD_URL",
+    "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json",
 )
 
 
 # ============================================================================
-# FORK 2 (KEPT AS A FUNCTION!): Python Function Tool in `network_agent`
+# FORK 1 (SEPARATELY DEPLOYED REMOTE AGENT!): `check_gcp_subnet_ips` via A2A
+# ============================================================================
+# Instead of running inside the same container/process, `check_gcp_subnet_ips`
+# is deployed as its own standalone Agent service in asia-southeast2.
+# `network_agent` calls it over the network using the Agent-to-Agent (A2A) protocol!
+
+check_gcp_subnet_ips = RemoteA2aAgent(
+    name="check_gcp_subnet_ips",
+    description=(
+        "Separately deployed GCP Subnet Calculator Agent that calculates total IPs, "
+        "usable IPs, netmask, and the 4 GCP-reserved IP addresses for any IPv4 CIDR block."
+    ),
+    agent_card=CHECK_GCP_SUBNET_IPS_CARD_URL,
+)
+
+
+# ============================================================================
+# FORK 2 (KEPT AS A LOCAL FUNCTION!): Python Function Tool in `network_agent`
 # ============================================================================
 
 def recommend_agent_gateway_mode(traffic_pattern: str) -> dict:
@@ -78,7 +75,7 @@ def recommend_agent_gateway_mode(traffic_pattern: str) -> dict:
 
 
 # ============================================================================
-# MAIN AGENT (`network_agent`): Connects Sub-Agent (Fork 1) + Function (Fork 2)
+# MAIN AGENT (`network_agent`): Calls Remote Agent (Fork 1) + Local Function (Fork 2)
 # ============================================================================
 
 root_agent = Agent(
@@ -89,10 +86,10 @@ root_agent = Agent(
         "You are `network_agent`, the Main Google Cloud Networking & Agent Gateway Assistant. "
         "Keep answers clear, structured, and beginner-friendly.\n"
         "- Whenever the user asks about subnet CIDRs, IP sizing, or usable GCP IPs, delegate/transfer the task "
-        "to your Sub-Agent `check_gcp_subnet_ips`.\n"
+        "to the remote `check_gcp_subnet_ips` agent.\n"
         "- Whenever the user asks about Agent Gateway architecture, deployment modes, or traffic flows, "
-        "call your function tool `recommend_agent_gateway_mode`."
+        "call your local function tool `recommend_agent_gateway_mode`."
     ),
-    sub_agents=[check_gcp_subnet_ips],          # <-- Fork 1: Formed as an Agent (🤖)
-    tools=[recommend_agent_gateway_mode],       # <-- Fork 2: Kept as a Function (🔧)
+    sub_agents=[check_gcp_subnet_ips],          # <-- Fork 1: Remote Agent over A2A (🤖)
+    tools=[recommend_agent_gateway_mode],       # <-- Fork 2: Local Python Function (🔧)
 )

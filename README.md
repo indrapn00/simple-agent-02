@@ -1,90 +1,170 @@
-# Simple Agent 02 (`network_agent` + `check_gcp_subnet_ips` Sub-Agent) — Multi-Agent Lab
+# Simple Agent 02 (`network-agent` + `check-gcp-subnet-ips`) — Distributed Multi-Agent A2A Architecture
 
-An evolution of [`simple-agent-01`](https://github.com/indrapn00/simple-agent-01) built with the **Google Agent Development Kit (ADK)** to study how **Multi-Agent Delegation (`sub_agents`)** differs from **Function Tool Calls (`tools`)** in Google Cloud (`gcp-demo-02-307713`, region `asia-southeast2`).
+A distributed **two-agent deployment** built with the **Google Agent Development Kit (ADK)** and **Agent-to-Agent (A2A)** protocol, deployed in **`asia-southeast2` (Jakarta)** on both **Cloud Run** and **Vertex AI Agent Engine (Agent Platform)** to study **Agent Gateway** and **Agent Registry**.
 
 ---
 
-## 1. Live Deployed Endpoints (`asia-southeast2` in `gcp-demo-02-307713`)
+## 1. What Changed from `simple-agent-01` to `simple-agent-02`?
 
-| Runtime Target | Region | Live Endpoint / Playground URL | Agent Registry Resource Name |
+In [`simple-agent-01`](https://github.com/indrapn00/simple-agent-01), there was only **1 deployed Agent** (`root_agent`) with **2 local Python functions**.
+
+In **`simple-agent-02`**, we split the deployment into **2 separate, independently deployed Agents** in `asia-southeast2`:
+
+| Component | In `simple-agent-01` | In `simple-agent-02` | How It Is Deployed Now |
 | :--- | :--- | :--- | :--- |
-| **Cloud Run (Web UI + API + A2A)** | `asia-southeast2` | **[https://simple-agent-02-66063681189.asia-southeast2.run.app](https://simple-agent-02-66063681189.asia-southeast2.run.app)** | `projects/gcp-demo-02-307713/locations/asia-southeast2/services/simple-agent-02-cloudrun` |
-| **Vertex AI Agent Engine** | `asia-southeast2` | **[Console Playground (`7034587433580625920`)](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/7034587433580625920/playground?project=gcp-demo-02-307713)** | `projects/gcp-demo-02-307713/locations/asia-southeast2/agents/agentregistry-00000000-0000-0000-5012-cc0780c36098` |
+| **Main Agent** | `network_gateway_assistant` | **`network-agent`** (`network_agent`) | Deployed as its own standalone service on **Cloud Run** and **Agent Platform** |
+| **Fork 1: `check_gcp_subnet_ips`** | 🔧 Plain Python Function | 🤖 **Standalone Remote Agent (`check-gcp-subnet-ips`)** | Deployed as its own separate service on **Cloud Run** and **Agent Platform**. `network-agent` calls it over the network via **A2A (`RemoteA2aAgent`)**! |
+| **Fork 2: `recommend_agent_gateway_mode`** | 🔧 Plain Python Function | 🔧 **Local Python Function** | Kept inside `network-agent` as a local function tool (`tools=[recommend_agent_gateway_mode]`) |
 
 ---
 
-## 2. What Changed from `simple-agent-01` to `simple-agent-02`?
+## 2. Visual Architecture (2 Separate Deployed Agents)
 
-In `simple-agent-01`, `network_agent` was a **Single Agent** with 2 Python functions (`🔧 check_gcp_subnet_ips` and `🔧 recommend_agent_gateway_mode`).
+```text
+                        [ User Prompt ]
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  DEPLOYED AGENT 1: `network-agent` (Main Orchestrator Agent)         │
+│  Cloud Run: https://network-agent-66063681189.asia-southeast2.run.app│
+│  Agent Engine ID: 1269979910546391040                                │
+│                                                                      │
+│                   🤖 network_agent (gemini-2.5-flash)                │
+│                      /                           \                   │
+│       Fork 1: Remote A2A Sub-Agent         Fork 2: Local Function    │
+│       (transfer_to_agent over HTTP)               (in-process)       │
+│                    /                               \                 │
+│                   ▼                                 ▼                │
+│     🌐 RemoteA2aAgent client          🔧 recommend_agent_gateway_mode│
+└───────────────────┼──────────────────────────────────────────────────┘
+                    │
+                    │  A2A Protocol (JSON-RPC over HTTPS)
+                    │  POST /a2a/check_gcp_subnet_ips
+                    ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  DEPLOYED AGENT 2: `check-gcp-subnet-ips` (Specialist Agent)         │
+│  Cloud Run: https://check-gcp-subnet-ips-66063681189...run.app       │
+│  Agent Engine ID: 6764371455938396160                                │
+│                                                                      │
+│               🤖 check_gcp_subnet_ips (gemini-2.5-flash)             │
+│                                  │                                   │
+│                                  ▼                                   │
+│                      🔧 calculate_subnet_ips                         │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-In **`simple-agent-02`**, we now have **2 Agents** and **1 Function**:
-1. **Main Agent (`🤖 network_agent`):** The orchestrator agent (`root_agent`).
-2. **Fork 1 — Formed as a Second Agent (`🤖 check_gcp_subnet_ips`):**
-   - Defined as `check_gcp_subnet_ips = Agent(model="gemini-2.5-flash", name="check_gcp_subnet_ips", ...)` and attached to `network_agent` via `sub_agents=[check_gcp_subnet_ips]`.
-   - In the ADK visual graph, it renders as a **rounded ellipse with a Robot icon (`🤖 check_gcp_subnet_ips`)**.
-   - When you ask a subnet question, `network_agent` calls ADK's built-in `transfer_to_agent(agent_name='check_gcp_subnet_ips')` to hand control over to the `check_gcp_subnet_ips` Agent (`node_info: network_agent@1/check_gcp_subnet_ips@1`).
-3. **Fork 2 — Kept as a Function (`🔧 recommend_agent_gateway_mode`):**
-   - Defined as `def recommend_agent_gateway_mode(traffic_pattern: str) -> dict:` and attached to `network_agent` via `tools=[recommend_agent_gateway_mode]`.
-   - In the ADK visual graph, it renders as a **rectangle box with a Wrench icon (`🔧 recommend_agent_gateway_mode`)**.
+### Networking Analogy: Why This Matters for Agent Gateway
+- **Fork 2 (`recommend_agent_gateway_mode`)** is an **internal function call** inside `network-agent`'s own process (like a router checking its local routing table).
+- **Fork 1 (`check-gcp-subnet-ips`)** is a **real network hop between two separately deployed agents** using the **A2A (Agent-to-Agent) protocol** (`/.well-known/agent-card.json` + JSON-RPC over HTTPS). This is the exact east-west **Agent-to-Agent (A2A)** traffic flow that **Agent Gateway** governs and secures!
 
-```mermaid
-flowchart LR
-    Main(["🤖 network_agent<br/>(Main Agent - Gemini 2.5 Flash)"])
-    Sub(["🤖 check_gcp_subnet_ips<br/>(Fork 1: Sub-Agent - Gemini 2.5 Flash)"])
-    Func["🔧 recommend_agent_gateway_mode<br/>(Fork 2: Python Function Tool)"]
+---
 
-    Main ---|"sub_agents=[check_gcp_subnet_ips]<br/>(Agent-to-Agent Transfer)"| Sub
-    Main ---|"tools=[recommend_agent_gateway_mode]<br/>(Direct Function Call)"| Func
+## 3. Live Deployments in `asia-southeast2` (`gcp-demo-02-307713`)
+
+### A. Cloud Run Services (`asia-southeast2`)
+1. **`network-agent` (Main Agent)**
+   - **Web UI / Playground:** `https://network-agent-66063681189.asia-southeast2.run.app`
+   - **A2A Agent Card URL:** `https://network-agent-66063681189.asia-southeast2.run.app/a2a/network_agent/.well-known/agent-card.json`
+   - **Agent Registry Service:** `projects/gcp-demo-02-307713/locations/asia-southeast2/services/network-agent-cloudrun`
+2. **`check-gcp-subnet-ips` (Standalone Subnet Calculator Agent)**
+   - **Web UI / Playground:** `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app`
+   - **A2A Agent Card URL:** `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json`
+   - **A2A JSON-RPC Endpoint:** `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips`
+   - **Agent Registry Service:** `projects/gcp-demo-02-307713/locations/asia-southeast2/services/check-gcp-subnet-ips-cloudrun`
+
+### B. Vertex AI Agent Engine / Agent Platform (`asia-southeast2`)
+1. **`network-agent` (Main Agent)**
+   - **Resource Name:** `projects/66063681189/locations/asia-southeast2/reasoningEngines/1269979910546391040`
+   - **Console Playground:** [Open `network-agent` in Agent Engine Playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/1269979910546391040/playground?project=66063681189)
+2. **`check-gcp-subnet-ips` (Standalone Subnet Calculator Agent)**
+   - **Resource Name:** `projects/66063681189/locations/asia-southeast2/reasoningEngines/6764371455938396160`
+   - **Console Playground:** [Open `check-gcp-subnet-ips` in Agent Engine Playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/6764371455938396160/playground?project=66063681189)
+
+---
+
+## 4. Repository Structure
+
+```text
+simple-agent-02/
+├── README.md
+├── check_gcp_subnet_ips/        # Deployed Agent 1: Standalone Subnet Calculator Agent
+│   ├── __init__.py
+│   ├── agent.py                 # Defines `check_gcp_subnet_ips` Agent + `calculate_subnet_ips` tool
+│   ├── agent.json               # A2A v1 AgentCard exposed at /a2a/check_gcp_subnet_ips/.well-known/agent-card.json
+│   └── requirements.txt
+└── network_agent/               # Deployed Agent 2: Main Orchestrator Agent
+    ├── __init__.py
+    ├── agent.py                 # Defines `network_agent` + RemoteA2aAgent(`check_gcp_subnet_ips`) + `recommend_agent_gateway_mode`
+    ├── agent.json               # A2A v1 AgentCard exposed at /a2a/network_agent/.well-known/agent-card.json
+    └── requirements.txt
 ```
 
 ---
 
-## 3. Code Structure (`network_agent/`)
+## 5. How to Test Both Forks on `network-agent`
 
-| File | Purpose |
-| :--- | :--- |
-| [`network_agent/__init__.py`](./network_agent/__init__.py) | Package entrypoint (`from . import agent`). |
-| [`network_agent/agent.py`](./network_agent/agent.py) | Defines the Sub-Agent `check_gcp_subnet_ips` (`🤖`), the function `recommend_agent_gateway_mode` (`🔧`), and the Main Agent `root_agent` (`🤖 network_agent`). |
-| [`network_agent/requirements.txt`](./network_agent/requirements.txt) | Lists required packages (`google-adk[a2a]` and `google-cloud-aiplatform[agent_engines]`). |
+Open the **`network-agent`** Web UI (`https://network-agent-66063681189.asia-southeast2.run.app`) or the Agent Engine Playground:
+
+### Test Fork 1 — Remote A2A Agent Call (`network-agent` $\rightarrow$ `check-gcp-subnet-ips`)
+Try asking:
+- *"How many usable IPs are in 10.10.0.0/28 in GCP?"*
+- *"Calculate the GCP reserved IPs and usable host count for 192.168.1.0/24."*
+
+**What you will see in the UI:**
+1. `network_agent` calls `transfer_to_agent(agent_name="check_gcp_subnet_ips")`.
+2. Behind the scenes, `RemoteA2aAgent` sends an A2A JSON-RPC request over HTTPS to the separately deployed **`check-gcp-subnet-ips`** service (`https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips`).
+3. The remote `check-gcp-subnet-ips` agent runs `calculate_subnet_ips` and returns the response back to `network_agent`.
+
+### Test Fork 2 — Local Function Call (`recommend_agent_gateway_mode`)
+Try asking:
+- *"Which Agent Gateway deployment mode should I use for agent to MCP tool egress traffic?"*
+- *"Recommend an Agent Gateway mode if I already have an existing ALB or Secure Web Proxy."*
+
+**What you will see in the UI:**
+1. `network_agent` calls its local Python function `recommend_agent_gateway_mode` directly inside its own container.
 
 ---
 
-## 4. Deploying `simple-agent-02` in `asia-southeast2`
+## 6. Deployment Commands Reference (`asia-southeast2`)
 
-### Option A: Deploy to Cloud Run (with Web UI + A2A Protocol)
+### Deploy Agent 1 (`check-gcp-subnet-ips`)
 ```bash
+# Deploy to Cloud Run (with A2A + Web UI)
 adk deploy cloud_run \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
-  --service_name=simple-agent-02 \
+  --service_name=check-gcp-subnet-ips \
+  --app_name=check_gcp_subnet_ips \
+  --with_ui \
+  --a2a \
+  ./check_gcp_subnet_ips \
+  -- --allow-unauthenticated
+
+# Deploy to Vertex AI Agent Engine
+adk deploy agent_engine \
+  --project=gcp-demo-02-307713 \
+  --region=asia-southeast2 \
+  --display_name="check-gcp-subnet-ips" \
+  ./check_gcp_subnet_ips
+```
+
+### Deploy Agent 2 (`network-agent`)
+```bash
+# Deploy to Cloud Run (with A2A + Web UI)
+adk deploy cloud_run \
+  --project=gcp-demo-02-307713 \
+  --region=asia-southeast2 \
+  --service_name=network-agent \
+  --app_name=network_agent \
   --with_ui \
   --a2a \
   ./network_agent \
   -- --allow-unauthenticated
 
-gcloud run services update simple-agent-02 \
-  --region=asia-southeast2 \
-  --project=gcp-demo-02-307713 \
-  --update-env-vars="GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=gcp-demo-02-307713,GOOGLE_CLOUD_LOCATION=global"
-```
-
-### Option B: Deploy to Agent Platform (Vertex AI Agent Engine)
-```bash
+# Deploy to Vertex AI Agent Engine
 adk deploy agent_engine \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
-  --display_name="simple-agent-02" \
-  --description="2-Agent Architecture: network_agent + check_gcp_subnet_ips Sub-Agent" \
+  --display_name="network-agent" \
   ./network_agent
 ```
-
----
-
-## 5. How to Test Both Forks (Agent Delegation vs. Function Call)
-
-1. **Test Fork 1 (Agent-to-Agent Delegation to `🤖 check_gcp_subnet_ips`):**
-   - **Prompt:** `"How many usable IPs are in 10.20.0.0/28 in GCP?"`
-   - **What happens in the trace:** `network_agent` invokes `transfer_to_agent(agent_name="check_gcp_subnet_ips")`, and the **`check_gcp_subnet_ips` Agent** (`author: "check_gcp_subnet_ips"`, path `network_agent@1/check_gcp_subnet_ips@1`) generates the response!
-2. **Test Fork 2 (Function Call to `🔧 recommend_agent_gateway_mode`):**
-   - **Prompt:** `"We have an existing Application Load Balancer (ALB). Which Agent Gateway mode should we use?"`
-   - **What happens in the trace:** `network_agent` calls `recommend_agent_gateway_mode(traffic_pattern="existing ALB")` and answers directly (`author: "network_agent"`).
