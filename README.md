@@ -226,3 +226,60 @@ gcloud run services update network-agent \
   --region=asia-southeast2 \
   --update-env-vars="GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=gcp-demo-02-307713,GOOGLE_CLOUD_LOCATION=global,SUBNET_AGENT_TARGET=agent_platform,CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID=projects/66063681189/locations/asia-southeast2/reasoningEngines/2395879817389015040"
 ```
+
+---
+
+## 6. How to Access `network-agent` When 100% Deployed on Agent Platform (No Cloud Run UI)
+
+Unlike Cloud Run (which bundles a public web server URL like `https://network-agent-...run.app`), **Agent Platform (Vertex AI Agent Engine)** is a managed backend runtime (similar to how a database or internal microservice doesn't host its own public website).
+
+When your agents are deployed **100% on Agent Platform**, here are the **4 ways** to access and test `network-agent`:
+
+### Way 1: Google Cloud Console Built-In "Playground" UI *(Browser Chat UI — Zero Code)*
+Google Cloud Console includes a built-in interactive chat UI for every Agent Engine:
+1. Open the [Google Cloud Console — Vertex AI Agent Engine](https://console.cloud.google.com/vertex-ai/agents/agent-engines?project=gcp-demo-02-307713).
+2. Make sure the **Region** dropdown at the top is set to **`asia-southeast2 (Jakarta)`**.
+3. Click on **`network-agent`** $\rightarrow$ click the **Playground** tab.
+   - **Direct link to your live `network-agent` Playground:**
+     [https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/5881665928973778944/playground?project=66063681189](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/asia-southeast2/agent-engines/5881665928973778944/playground?project=66063681189)
+
+### Way 2: REST API via `curl` *(Command Line / Postman)*
+You can call the Agent Platform regional API endpoint directly using your `gcloud` IAM access token:
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Content-Type: application/json" \
+  "https://asia-southeast2-aiplatform.googleapis.com/v1/projects/gcp-demo-02-307713/locations/asia-southeast2/reasoningEngines/5881665928973778944:streamQuery" \
+  -d '{
+    "class_method": "stream_query",
+    "input": {
+      "user_id": "indra",
+      "message": "How many usable IPs are in 10.10.0.0/28 in GCP?"
+    }
+  }'
+```
+
+### Way 3: Python SDK (`vertexai.agent_engines`)
+From any Python script, notebook, or another agent:
+
+```python
+import vertexai
+from vertexai import agent_engines
+
+vertexai.init(project="gcp-demo-02-307713", location="asia-southeast2")
+
+remote_network_agent = agent_engines.get(
+    "projects/66063681189/locations/asia-southeast2/reasoningEngines/5881665928973778944"
+)
+
+for event in remote_network_agent.stream_query(
+    user_id="indra",
+    message="How many usable IPs are in 10.10.0.0/28 in GCP?",
+):
+    print(event)
+```
+
+### Way 4: Gemini Enterprise (formerly Agentspace) UI *(Production End-User Chat UI)*
+In enterprise production environments where end-users don't have access to the Google Cloud Console, you register the Agent Engine (`projects/66063681189/locations/asia-southeast2/reasoningEngines/5881665928973778944`) into **Gemini Enterprise**, which provides the end-user web chat portal.
+
