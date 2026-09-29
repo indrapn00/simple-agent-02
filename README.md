@@ -283,3 +283,48 @@ for event in remote_network_agent.stream_query(
 ### Way 4: Gemini Enterprise (formerly Agentspace) UI *(Production End-User Chat UI)*
 In enterprise production environments where end-users don't have access to the Google Cloud Console, you register the Agent Engine (`projects/66063681189/locations/asia-southeast2/reasoningEngines/5881665928973778944`) into **Gemini Enterprise**, which provides the end-user web chat portal.
 
+---
+
+## 7. Troubleshooting Guide: `HTTP 404 Not Found` on `/.well-known/agent-card.json`
+
+### Symptom
+When `network-agent` tries to call `check-gcp-subnet-ips` in **Mode 1 (Cloud Run $\rightarrow$ Cloud Run)**, you see:
+```text
+Failed to initialize remote A2A agent check_gcp_subnet_ips:
+Failed to resolve AgentCard from URL https://check-gcp-subnet-ips-.../a2a/check_gcp_subnet_ips/.well-known/agent-card.json (HTTP 404)
+```
+even though `check-gcp-subnet-ips` is deployed and its Web UI works!
+
+### How to Troubleshoot It (Step-by-Step)
+
+#### Step 1: Check if the A2A Agent Card URL responds using `curl`
+```bash
+curl -i "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json"
+```
+If it returns `404 Not Found`, that means the FastAPI server inside `check-gcp-subnet-ips` booted up **without mounting the `/a2a/check_gcp_subnet_ips` route**.
+
+#### Step 2: Check the Cloud Run Startup Logs for `"Failed to setup A2A agent"`
+When `adk api_server --a2a` starts up on Cloud Run, if anything goes wrong while loading `agent.json` or mounting A2A routes, ADK logs an `ERROR` line and **continues booting the container anyway** (so the service still shows a green checkmark `✔` in Cloud Run!).
+
+Run this command to inspect the startup logs:
+```bash
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="check-gcp-subnet-ips" AND textPayload:"A2A"' \
+  --project=gcp-demo-02-307713 \
+  --limit=20 \
+  --format="value(timestamp,textPayload)"
+```
+
+#### Step 3: Common Root Causes Found in That Log
+1. **`Failed to setup A2A agent check_gcp_subnet_ips: No module named 'sse_starlette'`**
+   - **Why it happens:** If the terminal/Cloud Shell where you run `adk deploy cloud_run` has an older ADK version (such as `google-adk==2.6.2`), the auto-generated `Dockerfile` runs `pip install "google-adk[a2a]==2.6.2"`, which installs `a2a-sdk` **without** `sse-starlette` (`a2a-sdk[http-server]`).
+   - **Fix:** Ensure both [`check_gcp_subnet_ips/requirements.txt`](./check_gcp_subnet_ips/requirements.txt) and [`network_agent/requirements.txt`](./network_agent/requirements.txt) explicitly include `a2a-sdk[http-server]` and `sse-starlette`:
+     ```text
+     google-cloud-aiplatform[agent_engines]
+     google-adk[a2a]
+     a2a-sdk[http-server]
+     sse-starlette
+     ```
+2. **Missing `--a2a` flag or missing `agent.json` file:**
+   - Make sure `adk deploy cloud_run` includes the `--a2a` flag and `check_gcp_subnet_ips/agent.json` exists with valid JSON syntax.
+
+

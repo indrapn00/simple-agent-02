@@ -197,3 +197,48 @@ All static URLs and IDs in the code have been replaced with `<REPLACE_WITH_...>`
 | **`check-gcp-subnet-ips`** (Subnet Agent) | **Cloud Run** | `https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app` |
 | **`network-agent`** (Main Agent) | **Agent Platform** | `projects/66063681189/locations/asia-southeast2/reasoningEngines/5881665928973778944` |
 | **`check-gcp-subnet-ips`** (Subnet Agent) | **Agent Platform** | `projects/66063681189/locations/asia-southeast2/reasoningEngines/2395879817389015040` |
+
+---
+
+## 6. Troubleshooting Case Study: `HTTP 404 Not Found` on `/.well-known/agent-card.json`
+
+### 6.1 The Symptom
+You deployed both `check-gcp-subnet-ips` and `network-agent` to Cloud Run with `--a2a`, and configured `agent.json` and `agent.py` with the right Cloud Run URLs. Both services show a green checkmark (`✔`) in Cloud Run and their Web UIs load fine.
+However, when `network-agent` tries to call `check-gcp-subnet-ips`, it fails with:
+```text
+Failed to initialize remote A2A agent check_gcp_subnet_ips:
+Failed to resolve AgentCard from URL https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json (HTTP 404)
+```
+
+### 6.2 How to Diagnose It Like a Network Engineer
+1. **Test the A2A Discovery Endpoint Directly (`curl`):**
+   ```bash
+   curl -i "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json"
+   ```
+   Seeing `404 Not Found` while `/` returns `200 OK` means the container is up, **but FastAPI failed to mount the `/a2a/check_gcp_subnet_ips` route during startup**.
+
+2. **Check Cloud Run Startup Logs for `"Failed to setup A2A agent"`:**
+   In ADK (`google/adk/cli/fast_api.py`), if mounting the A2A route throws an exception during boot, ADK catches the exception, logs `ERROR - Failed to setup A2A agent ...`, and **continues starting the web server anyway**.
+   Run:
+   ```bash
+   gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="check-gcp-subnet-ips" AND textPayload:"A2A"' \
+     --project=gcp-demo-02-307713 \
+     --limit=20 \
+     --format="value(timestamp,textPayload)"
+   ```
+
+3. **The Exact Error Found in the Logs:**
+   ```text
+   ERROR - fast_api.py:742 - Failed to setup A2A agent check_gcp_subnet_ips: No module named 'sse_starlette'
+   ```
+
+### 6.3 Why It Happened & The Permanent Fix
+- **Root Cause:** The terminal/Cloud Shell used to run `adk deploy cloud_run` had **`google-adk==2.6.2`** installed. When `adk deploy cloud_run` generated the `Dockerfile`, it ran `pip install "google-adk[a2a]==2.6.2"`, which installs `a2a-sdk` **without** its HTTP server dependency `sse-starlette` (`a2a-sdk[http-server]`).
+- **Permanent Fix:** Add `a2a-sdk[http-server]` and `sse-starlette` explicitly to both [`check_gcp_subnet_ips/requirements.txt`](./check_gcp_subnet_ips/requirements.txt) and [`network_agent/requirements.txt`](./network_agent/requirements.txt):
+  ```text
+  google-cloud-aiplatform[agent_engines]
+  google-adk[a2a]
+  a2a-sdk[http-server]
+  sse-starlette
+  ```
+

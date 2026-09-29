@@ -1,2 +1,4 @@
 google-cloud-aiplatform[agent_engines]
 google-adk[a2a]
+a2a-sdk[http-server]
+sse-starlette
