@@ -327,4 +327,37 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 2. **Missing `--a2a` flag or missing `agent.json` file:**
    - Make sure `adk deploy cloud_run` includes the `--a2a` flag and `check_gcp_subnet_ips/agent.json` exists with valid JSON syntax.
 
+---
+
+### Case 2: On Agent Platform (Mode 2), `network-agent` Still Tries to Call the Cloud Run URL (`RemoteA2aAgent`)
+
+#### Symptom
+You deployed both `check-gcp-subnet-ips` and `network-agent` to **Agent Platform (Mode 2)** and set `CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID`, but when you query `network-agent` via `:streamQuery`, it returns:
+```text
+Failed to initialize remote A2A agent check_gcp_subnet_ips:
+Failed to resolve AgentCard from URL https://check-gcp-subnet-ips-...run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json
+```
+
+#### Root Cause (Google Cloud Internals Gotcha!)
+- Under the hood, **Vertex AI Agent Engine (Agent Platform)** runs your agent container on a Google-managed Knative / Cloud Run infrastructure inside a Google tenant project — which **also sets the `K_SERVICE` environment variable**!
+- If your code checks `os.environ.get("K_SERVICE")` to decide between `"cloud_run"` and `"agent_platform"`, it evaluates to `True` inside Agent Platform and mistakenly uses `RemoteA2aAgent` (Cloud Run URL) instead of `RemoteAgentEngineSubAgent` (Agent Platform ID)!
+
+#### Fix
+1. **In [`network_agent/agent.py`](./network_agent/agent.py) (Updated in Repo):**
+   Instead of checking `K_SERVICE`, `_is_running_on_agent_platform()` checks `"agentengine://" in " ".join(sys.argv)` (because `adk deploy agent_engine` always starts the container with `--session_service_uri=agentengine://...`).
+2. **Or Force Mode 2 Explicitly:**
+   When deploying Mode 2, you can also explicitly set:
+   ```python
+   SUBNET_AGENT_TARGET = os.environ.get("SUBNET_AGENT_TARGET", "agent_platform").lower()
+   ```
+   in [`network_agent/agent.py`](./network_agent/agent.py) so it is 100% locked to Agent Platform.
+3. **IAM Requirement for Agent Platform $\rightarrow$ Agent Platform:**
+   Make sure your project's **Reasoning Engine Service Agent** (`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`) has the **`roles/aiplatform.user`** role so `network-agent` on Agent Platform is allowed to query `check-gcp-subnet-ips` on Agent Platform:
+   ```bash
+   gcloud projects add-iam-policy-binding gcp-demo-02-307713 \
+     --member="serviceAccount:service-66063681189@gcp-sa-aiplatform-re.iam.gserviceaccount.com" \
+     --role="roles/aiplatform.user"
+   ```
+
+
 

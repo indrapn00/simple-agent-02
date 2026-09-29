@@ -1,15 +1,18 @@
+import json
 import os
+import sys
 from typing import AsyncGenerator
 import warnings
 
+import google.auth
+import google.auth.transport.requests
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.agents.llm_agent import Agent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
 from google.adk.events.event import Event
 from google.genai import types
-import vertexai
-from vertexai import agent_engines
+import httpx
 
 warnings.filterwarnings("ignore", message=".*EXPERIMENTAL.*")
 
@@ -34,7 +37,7 @@ os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 SUBNET_AGENT_TARGET = os.environ.get("SUBNET_AGENT_TARGET", "auto").lower()
 
 # 1. Target URL for Cloud Run `check-gcp-subnet-ips` (Used in Mode 1: Cloud Run -> Cloud Run)
-#    Current live URL: "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app"
+#    Example: "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app"
 CHECK_GCP_SUBNET_IPS_BASE_URL = os.environ.get(
     "CHECK_GCP_SUBNET_IPS_BASE_URL",
     "https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>",
@@ -45,7 +48,7 @@ CHECK_GCP_SUBNET_IPS_CARD_URL = os.environ.get(
 )
 
 # 2. Target Resource Name for Agent Platform `check-gcp-subnet-ips` (Used in Mode 2 & Mode 3)
-#    Current live ID: "projects/66063681189/locations/asia-southeast2/reasoningEngines/2395879817389015040"
+#    Example: "projects/66063681189/locations/asia-southeast2/reasoningEngines/8268573731480141824"
 CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID = os.environ.get(
     "CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID",
     "projects/66063681189/locations/asia-southeast2/reasoningEngines/<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID>",
@@ -58,10 +61,9 @@ CHECK_GCP_SUBNET_IPS_AGENT_ENGINE_ID = os.environ.get(
 
 class RemoteAgentEngineSubAgent(BaseAgent):
     """Sub-Agent that calls `check-gcp-subnet-ips` deployed on Vertex AI Agent Engine (Agent Platform)
-    with ZERO Cloud Run dependency!"""
+    via the regional Vertex AI `:streamQuery` REST API with ZERO Cloud Run dependency!"""
 
     agent_engine_id: str
-    project: str = "gcp-demo-02-307713"
     location: str = "asia-southeast2"
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
@@ -76,17 +78,36 @@ class RemoteAgentEngineSubAgent(BaseAgent):
                         user_text = "\n".join(texts)
                         break
 
-        vertexai.init(project=self.project, location=self.location)
-        remote_app = agent_engines.get(self.agent_engine_id)
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(google.auth.transport.requests.Request())
+
+        url = f"https://{self.location}-aiplatform.googleapis.com/v1/{self.agent_engine_id}:streamQuery"
+        payload = {
+            "class_method": "stream_query",
+            "input": {
+                "user_id": ctx.user_id or "default_user",
+                "message": user_text or "Calculate subnet IPs",
+            },
+        }
+
         final_text = ""
-        async for chunk in remote_app.async_stream_query(
-            user_id=ctx.user_id or "default_user",
-            message=user_text or "Calculate subnet IPs",
-        ):
-            if isinstance(chunk, dict):
-                parts = chunk.get("content", {}).get("parts", [])
-                for p in parts:
-                    if "text" in p and p["text"]:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {creds.token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                for p in data.get("content", {}).get("parts", []):
+                    if p.get("text"):
                         final_text = p["text"]
 
         if not final_text:
@@ -107,11 +128,20 @@ class RemoteAgentEngineSubAgent(BaseAgent):
 # FORK 1: BUILD THE REMOTE `check_gcp_subnet_ips` SUB-AGENT (CLOUD RUN OR AGENT PLATFORM)
 # ============================================================================
 
+def _is_running_on_agent_platform() -> bool:
+    """Returns True when running inside Vertex AI Agent Engine (Agent Platform).
+    Note: Vertex AI Agent Engine runs on a managed Knative runtime under the hood
+    (so `K_SERVICE` is set in BOTH Cloud Run and Agent Platform!).
+    However, `adk deploy agent_engine` always passes `--session_service_uri=agentengine://...`
+    in the container startup arguments (`sys.argv`).
+    """
+    cmdline = " ".join(sys.argv)
+    return "agentengine://" in cmdline or "--gemini_enterprise_app_name" in cmdline
+
+
 def _create_subnet_sub_agent() -> BaseAgent:
-    # Determine effective target:
-    # Cloud Run automatically sets the `K_SERVICE` environment variable.
     if SUBNET_AGENT_TARGET == "auto":
-        effective_target = "cloud_run" if os.environ.get("K_SERVICE") else "agent_platform"
+        effective_target = "agent_platform" if _is_running_on_agent_platform() else "cloud_run"
     else:
         effective_target = SUBNET_AGENT_TARGET
 

@@ -242,3 +242,28 @@ Failed to resolve AgentCard from URL https://check-gcp-subnet-ips-66063681189.as
   sse-starlette
   ```
 
+---
+
+### 6.4 Troubleshooting Case Study 2: Why Mode 2 (Agent Platform) Tried to Call the Cloud Run URL
+
+#### The Symptom
+After deploying both `check-gcp-subnet-ips` (`8268573731480141824`) and `network-agent` (`1765375869557145600`) to **Agent Platform**, calling `network-agent` via `:streamQuery` returned:
+```text
+Failed to initialize remote A2A agent check_gcp_subnet_ips:
+Failed to resolve AgentCard from URL https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json
+```
+Why did `network-agent` on Agent Platform try to use `RemoteA2aAgent` (the Cloud Run URL) instead of `RemoteAgentEngineSubAgent` (`8268573731480141824`)?
+
+#### The Root Cause (Google Cloud Internals Discovery)
+1. **Agent Platform Also Sets `K_SERVICE`!**
+   Under the hood, **Vertex AI Agent Engine (Agent Platform)** runs your agent container on a Google-managed Knative / Cloud Run runtime inside Google's tenant project — which **also sets the `K_SERVICE` environment variable**!
+   So checking `if os.environ.get("K_SERVICE")` inside `SUBNET_AGENT_TARGET = "auto"` evaluated to `True` on Agent Platform too, tricking `network_agent` into picking `"cloud_run"` instead of `"agent_platform"`!
+2. **How `adk deploy agent_engine` Can Be Reliably Detected:**
+   When `adk deploy agent_engine` generates the container's `Dockerfile`, it starts the server with:
+   `CMD adk api_server --port=8080 ... --session_service_uri=agentengine://projects/...`
+   Whereas `adk deploy cloud_run` uses `--session_service_uri=memory://`.
+   Checking `"agentengine://" in " ".join(sys.argv)` (or explicitly setting `SUBNET_AGENT_TARGET = "agent_platform"`) detects Agent Platform 100% reliably!
+3. **IAM Role Required for Agent Engine-to-Agent Engine Calls:**
+   On Agent Platform, `network-agent` runs as the **Reasoning Engine Service Agent** (`service-66063681189@gcp-sa-aiplatform-re.iam.gserviceaccount.com`). To allow one Agent Engine to call `:streamQuery` on another Agent Engine, that service account needs **`roles/aiplatform.user`** on the project.
+
+
