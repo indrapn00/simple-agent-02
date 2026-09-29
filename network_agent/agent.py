@@ -10,10 +10,25 @@ warnings.filterwarnings("ignore", message=".*EXPERIMENTAL.*")
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 
-# URL of the separately deployed `check-gcp-subnet-ips` agent's A2A Agent Card in asia-southeast2:
+# ============================================================================
+# IMPORTANT: CONFIGURE YOUR `check-gcp-subnet-ips` A2A AGENT URL HERE
+# ============================================================================
+# If you delete and recreate the `check-gcp-subnet-ips` Cloud Run service and get
+# a new URL, either:
+#   1. Replace `<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>` below with your
+#      new Cloud Run base URL (e.g. "https://check-gcp-subnet-ips-xxxxx.asia-southeast2.run.app"), OR
+#   2. Pass `--update-env-vars="CHECK_GCP_SUBNET_IPS_BASE_URL=https://..."` on Cloud Run.
+#
+# NOTE: This URL is used by `network_agent` in BOTH Cloud Run AND Agent Platform
+# (Vertex AI Agent Engine) whenever `network_agent` calls `check_gcp_subnet_ips` via A2A!
+CHECK_GCP_SUBNET_IPS_BASE_URL = os.environ.get(
+    "CHECK_GCP_SUBNET_IPS_BASE_URL",
+    "https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>",
+)
+
 CHECK_GCP_SUBNET_IPS_CARD_URL = os.environ.get(
     "CHECK_GCP_SUBNET_IPS_AGENT_CARD_URL",
-    "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips/.well-known/agent-card.json",
+    f"{CHECK_GCP_SUBNET_IPS_BASE_URL.rstrip('/')}/a2a/check_gcp_subnet_ips/.well-known/agent-card.json",
 )
 
 

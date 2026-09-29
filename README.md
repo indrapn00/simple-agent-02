@@ -125,7 +125,31 @@ Try asking:
 
 ---
 
-## 6. Deployment Commands Reference (`asia-southeast2`)
+## 6. Configuring the Remote Agent URL (If You Recreate `check-gcp-subnet-ips`)
+
+In [`network_agent/agent.py`](./network_agent/agent.py), the URL for `check-gcp-subnet-ips` uses a placeholder by default so you never accidentally point to a stale hardcoded URL:
+
+```python
+CHECK_GCP_SUBNET_IPS_BASE_URL = os.environ.get(
+    "CHECK_GCP_SUBNET_IPS_BASE_URL",
+    "https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>",
+)
+```
+
+If you delete and recreate the `check-gcp-subnet-ips` Cloud Run service and receive a new URL:
+1. **Option A (Without touching code — Cloud Run only):** Update the environment variable on the `network-agent` Cloud Run service:
+   ```bash
+   gcloud run services update network-agent \
+     --project=gcp-demo-02-307713 \
+     --region=asia-southeast2 \
+     --update-env-vars="CHECK_GCP_SUBNET_IPS_BASE_URL=https://<YOUR_NEW_CHECK_GCP_SUBNET_IPS_URL>"
+   ```
+2. **Option B (For both Cloud Run and Agent Platform / Vertex AI Agent Engine):** Replace `https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>` in [`network_agent/agent.py`](./network_agent/agent.py) (and `supported_interfaces[0].url` in [`check_gcp_subnet_ips/agent.json`](./check_gcp_subnet_ips/agent.json) if the URL of `check-gcp-subnet-ips` changed) before deploying.
+   - **Important:** Because both Cloud Run and Agent Platform run [`network_agent/agent.py`](./network_agent/agent.py), `network-agent` on **Agent Platform** also uses this URL to call the remote `check-gcp-subnet-ips` A2A endpoint!
+
+---
+
+## 7. Deployment Commands Reference (`asia-southeast2`)
 
 ### Deploy Agent 1 (`check-gcp-subnet-ips`)
 ```bash
@@ -161,7 +185,13 @@ adk deploy cloud_run \
   ./network_agent \
   -- --allow-unauthenticated
 
-# Deploy to Vertex AI Agent Engine
+# Configure the remote check-gcp-subnet-ips URL & Vertex AI env vars on Cloud Run
+gcloud run services update network-agent \
+  --project=gcp-demo-02-307713 \
+  --region=asia-southeast2 \
+  --update-env-vars="GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=gcp-demo-02-307713,GOOGLE_CLOUD_LOCATION=global,CHECK_GCP_SUBNET_IPS_BASE_URL=https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app"
+
+# Deploy to Vertex AI Agent Engine (make sure CHECK_GCP_SUBNET_IPS_BASE_URL in network_agent/agent.py is set first!)
 adk deploy agent_engine \
   --project=gcp-demo-02-307713 \
   --region=asia-southeast2 \
