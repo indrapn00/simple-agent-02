@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "supported_interfaces": [
     {
-      "url": "https://check-gcp-subnet-ips-66063681189.asia-southeast2.run.app/a2a/check_gcp_subnet_ips",
+      "url": "https://<REPLACE_WITH_CHECK_GCP_SUBNET_IPS_CLOUD_RUN_URL>/a2a/check_gcp_subnet_ips",
       "protocol_binding": "JSONRPC",
       "protocol_version": "1.0"
     }
